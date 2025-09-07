@@ -13,7 +13,10 @@ class BankOfEnglandIADBClient(_base.BaseDataClient):
     def __init__(self):
         super().__init__()
 
-        self.config = config_handler.get_config("bank_of_england.yaml")
+        # since we import this into other modules, this config won't work
+        self.config = config_handler.get_config(
+            "src/data_clients/config/bank_of_england.yaml", check_possible_paths=False
+        )
 
         self.time_series_null_coverage_tolerance = (
             0.8  # 80% maximum null values tolerated

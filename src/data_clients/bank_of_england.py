@@ -1,6 +1,8 @@
 from common_utils.io_handler import external
 from common_utils import config_handler
 from data_clients import logger, _base
+import data_clients
+
 import pandas as pd
 from datetime import datetime
 import pytz
@@ -13,9 +15,8 @@ class BankOfEnglandIADBClient(_base.BaseDataClient):
     def __init__(self):
         super().__init__()
 
-        # since we import this into other modules, this config won't work
         self.config = config_handler.get_config(
-            "src/data_clients/config/bank_of_england.yaml", check_possible_paths=False
+            "bank_of_england.yaml", module_name=data_clients.__name__
         )
 
         self.time_series_null_coverage_tolerance = (

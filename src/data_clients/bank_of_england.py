@@ -1,7 +1,6 @@
 from common_utils.io_handler import external
-from common_utils import config_handler
 from data_clients import logger, _base
-import data_clients
+
 
 import pandas as pd
 from datetime import datetime
@@ -12,12 +11,8 @@ from io import BytesIO
 
 class BankOfEnglandIADBClient(_base.BaseDataClient):
 
-    def __init__(self):
-        super().__init__()
-
-        self.config = config_handler.get_config(
-            "bank_of_england.yaml", module_name=data_clients.__name__
-        )
+    def __init__(self, config_file="bank_of_england.yaml"):
+        super().__init__(config_file)
 
         self.time_series_null_coverage_tolerance = (
             0.8  # 80% maximum null values tolerated
@@ -104,7 +99,7 @@ class BankOfEnglandIADBClient(_base.BaseDataClient):
 
     def get_mortgage_data(self, date_to=None):
 
-        mortgage_code_mappings = self.config["mortgage-code"]
+        mortgage_code_mappings = self.config["mortgage code"]
         series_codes = list(mortgage_code_mappings.keys())
         logger.info(f"Successfully loaded mortgage series codes metadata from config.")
 

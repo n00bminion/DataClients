@@ -3,118 +3,16 @@ from common_utils.data_handler.decorator import add_created_audit_columns
 from data_clients import logger, _base
 import pandas as pd
 import re
-import html
 from datetime import datetime
+from data_clients.vanguard import utils
 
 
-STR_TO_BOOL = {"false": False, "true": True}
-STR_NUM_SCALE_TO_NUM = {"billion": 1e9, "million": 1e6, "thousand": 1e3}
-CURR_SIGN_TO_CURR_NAME = {"£": "GBP"}
-
-
-def derive_asset_allocations_from_all_product_details(all_product_details):
-    asset_allocations = (
-        all_product_details["assetAllocations"]
-        .explode()
-        .apply(pd.Series)
-        .set_index("label", append=True)
-        .drop(columns=["code"])
-    )
-    derived_cash_allocation = (
-        (100 - asset_allocations.groupby(level=0)["value"].sum())
-        .where(lambda x: x != 0)
-        .dropna()
-        .to_frame()
-        .assign(label="Cash")
-        .set_index("label", append=True)
-    )
-    return pd.concat([asset_allocations, derived_cash_allocation], axis=0).sort_index()
-
-
-def derive_historical_fund_distributions(all_product_details):
-    historical_fund_distribution = (
-        all_product_details.fundDataDistributionHistoryFundDistributionList.explode()
-        .dropna()
-        .apply(pd.Series)
-        .set_index(["exDividendDate", "payableDate", "recordDate"], append=True)
-    )
-    return (
-        historical_fund_distribution.join(
-            historical_fund_distribution.mostRecent.apply(pd.Series).drop(
-                columns=["value"]
-            ),
-            how="left",
-        )
-        .drop(columns=["mostRecent", "recordDateUnformatted"])
-        .sort_index()
-    )
-
-
-def derive_total_assets_column(column):
-    dfs = [
-        # non na values we convert the billion/million suffix to number and multiply
-        column[~column.isna()]
-        .str.split(" ")
-        .map(lambda x: float(x[0]) * STR_NUM_SCALE_TO_NUM.get(x[1].lower(), 1)),
-        # concat with na values
-        column[column.isna()],
-    ]
-
-    return pd.concat(
-        [df for df in dfs if not df.empty],
-        axis=0,
-    )
-
-
-def derive_fee_column(column):
-    # these fee columns are a bit of an unknown as they are only None or '' so might
-    # need to change logic in future if they get populated with values in future
-    # but for now change them to float
-    return column.str.replace("None", "").replace("", None).astype(float)
-
-
-def derive_ocf_column(column):
-    return column.str.rstrip("%").astype("float64") / 100
-
-
-def derive_currency_column(column):
-    return pd.concat(
-        [
-            column[~column.isna()].map(html.unescape),
-            column[column.isna()],
-        ],
-        axis=0,
-    )
-
-
-def derive_tax_status_column(column):
-    return column.fillna("N/A").str.upper()
-
-
-def derive_numerical_float_column(column):
-    return column.replace("", None).astype("float")
-
-
-def derive_numerical_int_column(column):
-    return column.str.replace(",", "").replace("", None).astype("Int32")
-
-
-def derive_noa_value_column(column):
-    return column.str.replace("-", "").replace("", None).astype("Int64")
-
-
-class VanguardAPIClient(_base.BaseDataClient):
+class VanguardClient(_base.BaseDataClient):
 
     def __init__(self, config_file="vanguard.yaml"):
         super().__init__(config_file)
         self.base_url = "https://www.vanguardinvestor.co.uk/api"
         self.base_graphql_url = "https://www.vanguardinvestor.co.uk/gpx/graphql"
-
-    def get_product_comprehensive_details(self, product_id):
-        response = external.get_request(f"{self.base_url}/funds/{product_id}")
-        json_resp = response.json()
-        logger.info(f"Successfully fetched product detail for {product_id=}")
-        return json_resp
 
     @add_created_audit_columns
     def get_all_product_general_details(self):
@@ -125,7 +23,7 @@ class VanguardAPIClient(_base.BaseDataClient):
         raw_data = pd.DataFrame(json_resp)
         stripped_data = (
             raw_data.assign(
-                noaValue=derive_noa_value_column(raw_data.noaValue),
+                noaValue=utils.derive_noa_value_column(raw_data.noaValue),
             )
             # remove dictionary columns
             .drop(
@@ -169,12 +67,18 @@ class VanguardAPIClient(_base.BaseDataClient):
     def get_all_product_details(self):
         all_products = self.get_all_product_general_details()
 
+        def get_product_comprehensive_details(product_id):
+            response = external.get_request(f"{self.base_url}/funds/{product_id}")
+            json_resp = response.json()
+            logger.info(f"Successfully fetched product detail for {product_id=}")
+            return json_resp
+
         # Combine all product details into a single DataFrame
         all_product_details_combined = pd.concat(
             map(
                 pd.json_normalize,
                 [
-                    self.get_product_comprehensive_details(product_id)
+                    get_product_comprehensive_details(product_id)
                     for product_id in all_products.id
                 ],
             )
@@ -214,26 +118,28 @@ class VanguardAPIClient(_base.BaseDataClient):
             )
             .assign(
                 isGlobalBalanced=all_product_details_combined.isGlobalBalanced.str.lower().map(
-                    STR_TO_BOOL
+                    utils.STR_TO_BOOL
                 ),
-                OCF=derive_ocf_column(all_product_details_combined.OCF),
-                purchaseFee=derive_fee_column(all_product_details_combined.purchaseFee),
-                redemptionFee=derive_fee_column(
+                OCF=utils.derive_ocf_column(all_product_details_combined.OCF),
+                purchaseFee=utils.derive_fee_column(
+                    all_product_details_combined.purchaseFee
+                ),
+                redemptionFee=utils.derive_fee_column(
                     all_product_details_combined.redemptionFee
                 ),
-                totalAssets=derive_total_assets_column(
+                totalAssets=utils.derive_total_assets_column(
                     all_product_details_combined.totalAssets
                 ),
-                totalAssetsCurrency=derive_currency_column(
+                totalAssetsCurrency=utils.derive_currency_column(
                     all_product_details_combined.totalAssetsCurrency
                 ),
-                taxStatus=derive_tax_status_column(
+                taxStatus=utils.derive_tax_status_column(
                     all_product_details_combined.taxStatus
                 ),
-                marketPriceAmountChange=derive_numerical_float_column(
+                marketPriceAmountChange=utils.derive_numerical_float_column(
                     all_product_details_combined.marketPriceAmountChange
                 ),
-                totalNetAssetsValue=derive_total_assets_column(
+                totalNetAssetsValue=utils.derive_total_assets_column(
                     all_product_details_combined.totalNetAssetsValue
                 ),
                 benchmarkLabelsAboutTheBenchmark=all_product_details_combined.benchmarkLabelsAboutTheBenchmark.astype(
@@ -250,13 +156,13 @@ class VanguardAPIClient(_base.BaseDataClient):
                 exclusionsPriceAndPerformanceGrowthOf10k=all_product_details_combined.exclusionsPriceAndPerformanceGrowthOf10k.convert_dtypes().fillna(
                     False
                 ),
-                numberOfBonds=derive_numerical_int_column(
+                numberOfBonds=utils.derive_numerical_int_column(
                     all_product_details_combined.numberOfBonds
                 ),
-                numberOfStocks=derive_numerical_int_column(
+                numberOfStocks=utils.derive_numerical_int_column(
                     all_product_details_combined.numberOfStocks
                 ),
-                numberOfIssuers=derive_numerical_int_column(
+                numberOfIssuers=utils.derive_numerical_int_column(
                     all_product_details_combined.numberOfIssuers
                 ),
             )
@@ -341,10 +247,10 @@ class VanguardAPIClient(_base.BaseDataClient):
             ).drop(columns=[column])
 
         # extract the other stuff out into seperate tables
-        asset_allocations = derive_asset_allocations_from_all_product_details(
+        asset_allocations = utils.derive_asset_allocations_from_all_product_details(
             all_product_details_combined
         )
-        historical_fund_distributions = derive_historical_fund_distributions(
+        historical_fund_distributions = utils.derive_historical_fund_distributions(
             all_product_details_combined
         )
 
@@ -366,8 +272,9 @@ class VanguardAPIClient(_base.BaseDataClient):
             historical_fund_distributions,
         )
 
+    @utils.assert_port_ids_list
     def get_products_price_time_series(
-        self, product_ids, start_date=None, end_date=None, load_historical=False
+        self, port_ids, start_date=None, end_date=None, load_historical=False
     ):
         today = datetime.now().strftime("%Y-%m-%d")
 
@@ -380,10 +287,6 @@ class VanguardAPIClient(_base.BaseDataClient):
 
         if not end_date:
             end_date = today
-
-        assert isinstance(
-            product_ids, list
-        ), f"{type(product_ids) = } was passed in but only a list of product_ids is allowed"
 
         price_detail_query = """
             query PriceDetailsQuery($portIds: [String!]!, $startDate: String!, $endDate: String!, $limit: Float) {
@@ -429,7 +332,7 @@ class VanguardAPIClient(_base.BaseDataClient):
             json_data = {
                 "query": price_detail_query,
                 "variables": {
-                    "portIds": product_ids,
+                    "portIds": port_ids,
                     "startDate": start_date,
                     "endDate": end_date,
                     "limit": 0,
@@ -443,7 +346,7 @@ class VanguardAPIClient(_base.BaseDataClient):
         )
 
         def _extract_price_data_from_response():
-            yield from zip(product_ids, response.json()["data"]["funds"])
+            yield from zip(port_ids, response.json()["data"]["funds"])
 
         nav_prices_list, market_prices_list = [], []
 
@@ -487,9 +390,260 @@ class VanguardAPIClient(_base.BaseDataClient):
 
         return nav_prices_list, market_prices_list
 
+    @add_created_audit_columns
+    @utils.assert_port_ids_list
+    def get_products_sector_exposure(self, port_ids):
+        weight_exposure_query = """
+            query WeightExposureQuery($portIds: [String!]!) {
+                funds(portIds: $portIds) {
+                    sectorDiversification {
+                        sectorName
+                        benchmarkPercent
+                        fundPercent
+                        date
+                        __typename
+                        }
+                    __typename
+                    }
+                }
+        """
+
+        json_data = {
+            "query": weight_exposure_query,
+            "variables": {
+                "portIds": port_ids,
+                "limit": 0,
+            },
+            "operationName": "WeightExposureQuery",
+        }
+
+        response = external.post_request(
+            self.base_graphql_url,
+            json=json_data,
+        )
+
+        return pd.concat(
+            [
+                pd.DataFrame(data["sectorDiversification"]).assign(portId=portId)
+                for portId, data in zip(port_ids, response.json()["data"]["funds"])
+            ]
+        )
+
+    @utils.assert_port_ids_list
+    def get_products_market_allocation(self, port_ids):
+        market_allocation_query = """
+            query MarketAllocationQuery($portIds: [String!], $holdingStatCodes: [HOLDING_STAT_CODES!]) {
+                funds(portIds: $portIds) {
+                    profile {
+                    primaryMarketEquityClassification
+                    __typename
+                    }
+                    marketAllocation(holdingStatCodes: $holdingStatCodes) {
+                    countryName
+                    regionName
+                    fundMktPercent
+                    benchmarkMktPercent
+                    holdingStatCode
+                    date
+                    __typename
+                    }
+                    __typename
+                }
+                }
+        """
+        holding_stat_codes = ["FTCTYATPCS", "MSCTYATPCS"]
+        json_data = {
+            "query": market_allocation_query,
+            "variables": {
+                "holdingStatCodes": holding_stat_codes,
+                "portIds": port_ids,
+                "limit": 0,
+            },
+            "operationName": "MarketAllocationQuery",
+        }
+
+        response = external.post_request(
+            self.base_graphql_url,
+            json=json_data,
+        )
+        return pd.concat(
+            [
+                pd.DataFrame(data["marketAllocation"]).assign(
+                    primaryMarketEquityClassification=data["profile"][
+                        "primaryMarketEquityClassification"
+                    ],
+                    portId=portId,
+                )
+                for portId, data in zip(port_ids, response.json()["data"]["funds"])
+            ]
+        )
+
+    @add_created_audit_columns
+    @utils.assert_port_ids_list
+    def get_products_region_exposure(self, port_ids):
+        region_exposure_query = """
+            query RegionExposureQuery($portIds: [String!]!) {
+                funds(portIds: $portIds) {
+                    regionExposure {
+                    items {
+                        regionName
+                        effectiveDate
+                        fundMktPercent
+                        holdingStatCode
+                        __typename
+                    }
+                    __typename
+                    }
+                    __typename
+                }
+            }
+        """
+        json_data = {
+            "query": region_exposure_query,
+            "variables": {
+                "portIds": port_ids,
+                "limit": 0,
+            },
+            "operationName": "RegionExposureQuery",
+        }
+        response = external.post_request(
+            self.base_graphql_url,
+            json=json_data,
+        )
+
+        return pd.concat(
+            [
+                pd.DataFrame(data["regionExposure"]["items"]).assign(portId=portId)
+                for portId, data in zip(port_ids, response.json()["data"]["funds"])
+            ]
+        )
+
+    @add_created_audit_columns
+    @utils.assert_port_ids_list  # even though only 1 item can be passed, it still need to be wrapped in a list
+    def get_product_holdings_details(self, port_id):
+
+        if (len(port_id) > 1) or (len(port_id) == 0):
+            raise ValueError(
+                f"Only 1 port_id is allowed and must be wrapped in a list. {len(port_id)} port_ids was passed as parameter"
+            )
+
+        security_types = [
+            # mutual funds
+            "MF.MF",
+            # fixed income
+            "FI.ABS",
+            "FI.CONV",
+            "FI.CORP",
+            "FI.IP",
+            "FI.LOAN",
+            "FI.MBS",
+            "FI.MUNI",
+            "FI.NONUS_GOV",
+            "FI.US_GOV",
+            # money markets
+            "MM.AGC",
+            "MM.BACC",
+            "MM.CD",
+            "MM.CP",
+            "MM.MCP",
+            "MM.RE",
+            "MM.TBILL",
+            "MM.TD",
+            "MM.TFN",
+            # stocks
+            "EQ.DRCPT",
+            "EQ.ETF",
+            "EQ.FSH",
+            "EQ.PREF",
+            "EQ.PSH",
+            "EQ.REIT",
+            "EQ.STOCK",
+            "EQ.RIGHT",
+            "EQ.WRT",
+        ]
+
+        holding_details_query = """
+            query HoldingDetailsQuery($portIds: [String!], $securityTypes: [String!], $lastItemKey: String) {
+            borHoldings(portIds: $portIds) {
+                holdings(limit: 1500, securityTypes: $securityTypes, lastItemKey: $lastItemKey) {
+                totalHoldings
+                lastItemKey
+                items {
+                    effectiveDate
+                    marketValuePercentage
+                    issuerName
+                    securityLongDescription
+                    couponRate
+                    securityType
+                    finalMaturity
+                    __typename
+                }
+                __typename
+                }
+                __typename
+            }
+            funds(portIds: $portIds) {
+                profile {
+                assetClassificationLevel1
+                __typename
+                }
+                __typename
+            }
+            }
+        """
+
+        json_data = {
+            "query": holding_details_query,
+            "variables": {
+                "portIds": port_id,
+                "lastItemKey": None,
+                "securityTypes": security_types,
+            },
+            "operationName": "HoldingDetailsQuery",
+        }
+
+        holdings_list = []
+
+        def _extract_holdings_data_from_response():
+            while True:
+                response = external.post_request(
+                    self.base_graphql_url,
+                    json=json_data,
+                )
+
+                holdings = response.json()["data"]["borHoldings"][0]["holdings"]
+                total_holdings = holdings.get("totalHoldings", 0)
+                new_last_item_key = holdings.get("lastItemKey", None)
+
+                logger.info(
+                    f"Successfully fetched {len(holdings_list)} holdings for port_id = {port_id[0]}. {len(holdings_list)/total_holdings:.2%} completed"
+                )
+
+                yield holdings["items"]
+
+                if not new_last_item_key:
+                    logger.info(
+                        f"Successfully fetched all data. {total_holdings - len(holdings_list)} holdings did not get fetched. {1-len(holdings_list)/total_holdings:.2%} missing"
+                    )
+                    break
+
+                # we assign the new last item key to the json payload so it can run in the next loop
+                json_data["variables"]["lastItemKey"] = new_last_item_key
+                logger.info(
+                    f"Fetching for addition holdings for port_id = {port_id[0]}, {total_holdings - len(holdings_list)} holdings left to fetch. "
+                )
+
+        for holdings in _extract_holdings_data_from_response():
+            holdings_list.extend(holdings)
+
+        return pd.DataFrame(holdings_list).assign(portId=port_id[0])
+
 
 if __name__ == "__main__":
-    client = VanguardAPIClient()
-    data = client.get_all_product_general_details()
+    client = VanguardClient()
+    port_ids = client.get_all_product_general_details().index
+    data = client.get_products_market_allocation(port_ids)
+    data
 
-    price = client.get_products_price_time_series(data.index.to_list())
+    # data = client.get_products_sector_exposure(["9678", ])
+    # data

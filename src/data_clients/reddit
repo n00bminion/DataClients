@@ -1,0 +1,30 @@
+from data_clients import logger, _base
+from common_utils.io_handler import external
+
+
+class RedditClient(_base.BaseDataClient):
+
+    def __init__(self):
+        super().__init__()
+        self.base_url = "https://www.reddit.com"
+        logger.warning(
+            "Requests to reddit url is heavily limited, use dummy user-agent in the headers to bypass this"
+        )
+
+    def get_subredddit_data(self, subreddit_name):
+        subreddit_url = f"{self.base_url}/r/{subreddit_name}/.json"
+
+        response = external.get_request(
+            subreddit_url  # , headers={"User-agent": "your bot 0.1"}
+        )
+        logger.info(
+            f"Succesfully fetched data from {subreddit_name = }. "
+            f"The {subreddit_url = }"
+        )
+        return response.json()
+
+
+if __name__ == "__main__":
+    client = RedditClient()
+    data = client.get_subredddit_data("wallstreetbets")
+    data

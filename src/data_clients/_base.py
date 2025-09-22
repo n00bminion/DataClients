@@ -12,7 +12,11 @@ class BaseDataClient:
             self.config = config_handler.get_config(
                 config_file, module_name=data_clients.__name__
             )
+            logger.info(f"Using config file {config_file}")
         else:
             self.config = {}
+            logger.warning(
+                "No config file was passed in, config attribute is set to an empty dictionary"
+            )
 
         # do some more stuff here if needed
